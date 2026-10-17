@@ -250,6 +250,12 @@ def create_server(
             set_active_profile(previous_profile)
 
     instructions = SERVER_INSTRUCTIONS
+    if os.environ.get("NOTEBOOKLM_MCP_REAUTH_LINKS") == "1" and file_transfer is not None:
+        instructions += (
+            " If Google reports an AUTH error, call auth_recovery_link and present"
+            " its short-lived recovery_url to the user. Never ask the user to"
+            " paste account cookies or tokens into chat."
+        )
     if multi_profile:
         instructions += (
             " Every tool call requires an explicit profile argument. Configured profiles: "
@@ -271,4 +277,11 @@ def create_server(
     from ._uploadwidget import register_upload_widget
 
     register_upload_widget(registrar, file_transfer)
+    # Browser reauthentication is opt-in and never exposed on local stdio.
+    # The initial handoff supports uploading an already-created storage file;
+    # server-hosted Google login is deliberately not claimed yet.
+    from ._auth_recovery import register_auth_recovery
+
+    if not multi_profile:
+        register_auth_recovery(mcp, file_transfer)
     return mcp
