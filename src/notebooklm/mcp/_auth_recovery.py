@@ -11,6 +11,7 @@ The signing key is ephemeral and the link is short-lived and one-use.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -21,8 +22,9 @@ from fastmcp import Context
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse, Response
 
+from ..client import NotebookLMClient
 from ..paths import get_storage_path
-from ._confirm import READ_ONLY
+from ._context import reload_client_from_app
 from ._context import get_profile_state
 from ._filelink import FileLinkError, FileTransferConfig
 
@@ -100,6 +102,23 @@ def _validate_storage(raw: bytes, expected_account: str) -> dict[str, Any]:
     return data
 
 
+async def _check_live_storage(raw: bytes, expected_account: str) -> None:
+    """Check a candidate against Google before replacing the working session."""
+    with tempfile.TemporaryDirectory(prefix="notebooklm-auth-check-") as directory:
+        candidate = Path(directory) / "storage_state.json"
+        candidate.write_bytes(raw)
+        candidate.chmod(0o600)
+
+        async def _run() -> None:
+            async with NotebookLMClient.from_storage(path=candidate) as client:
+                await client.settings.get_user_settings()
+                actual_email = await client.get_account_email(live_fallback=True)
+                if not actual_email or actual_email.casefold() != expected_account.casefold():
+                    raise ValueError("Conta Google diferente da esperada.")
+
+        await asyncio.wait_for(_run(), timeout=60)
+
+
 def _write_storage(storage: Path, raw: bytes) -> None:
     """Write to the target filesystem atomically, without logging credential data."""
     storage.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +147,7 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
     if not expected or "@" not in expected:
         raise ValueError(f"{ENV_EXPECTED_ACCOUNT} must be set for reauth links")
 
-    @mcp.tool(annotations=READ_ONLY)
+    @mcp.tool
     async def auth_recovery_link(ctx: Context) -> dict[str, Any]:
         """Get a secure 5-minute reauthentication hand-off link after an AUTH error.
 
@@ -182,13 +201,31 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
             if not isinstance(profile, str) or not profile:
                 return PlainTextResponse("Perfil inválido.", status_code=403, headers=HEADERS)
             try:
+                await _check_live_storage(bytes(raw), expected)
+            except (Exception, asyncio.TimeoutError):
+                # Never replace the active profile when Google rejects the candidate.
+                return PlainTextResponse(
+                    "O Google não aceitou essa sessão. Faça login novamente e tente outro arquivo.",
+                    status_code=422, headers=HEADERS,
+                )
+            try:
                 _write_storage(get_storage_path(profile=profile), bytes(raw))
             except OSError:
                 return PlainTextResponse("Não foi possível salvar a sessão.", status_code=500, headers=HEADERS)
+            # Drop cached, expired client credentials. The next MCP call opens
+            # the newly persisted snapshot without restarting Railway.
+            try:
+                await reload_client_from_app(request, profile=profile)
+            except Exception:
+                # Credentials are persisted; a later service restart can reload.
+                return PlainTextResponse(
+                    "Sessão atualizada e validada; reinicie o MCP para carregar a nova sessão.",
+                    status_code=202, headers=HEADERS,
+                )
             config.jti_store.commit(jti, int(payload["exp"]))
             committed = True
             return PlainTextResponse(
-                "Credenciais recebidas. A conexão deve ser validada novamente pelo MCP.",
+                "Acesso restaurado. Volte ao ChatGPT e repita sua consulta.",
                 headers=HEADERS,
             )
         finally:
