@@ -102,7 +102,7 @@ def _validate_storage(raw: bytes, expected_account: str) -> dict[str, Any]:
     return data
 
 
-async def _check_live_storage(raw: bytes, expected_account: str) -> None:
+async def _check_live_storage(raw: bytes, expected_account: str) -> bytes:
     """Check a candidate against Google before replacing the working session."""
     with tempfile.TemporaryDirectory(prefix="notebooklm-auth-check-") as directory:
         candidate = Path(directory) / "storage_state.json"
@@ -117,6 +117,7 @@ async def _check_live_storage(raw: bytes, expected_account: str) -> None:
                     raise ValueError("Conta Google diferente da esperada.")
 
         await asyncio.wait_for(_run(), timeout=60)
+        return candidate.read_bytes()
 
 
 def _write_storage(storage: Path, raw: bytes) -> None:
@@ -201,7 +202,7 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
             if not isinstance(profile, str) or not profile:
                 return PlainTextResponse("Perfil inválido.", status_code=403, headers=HEADERS)
             try:
-                await _check_live_storage(bytes(raw), expected)
+                checked_raw = await _check_live_storage(bytes(raw), expected)
             except (Exception, asyncio.TimeoutError):
                 # Never replace the active profile when Google rejects the candidate.
                 return PlainTextResponse(
@@ -209,9 +210,13 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
                     status_code=422, headers=HEADERS,
                 )
             try:
-                _write_storage(get_storage_path(profile=profile), bytes(raw))
+                _write_storage(get_storage_path(profile=profile), checked_raw)
             except OSError:
                 return PlainTextResponse("Não foi possível salvar a sessão.", status_code=500, headers=HEADERS)
+            # Burn the link as soon as credentials are written, even when a
+            # subsequent in-memory client reload fails.
+            config.jti_store.commit(jti, int(payload["exp"]))
+            committed = True
             # Drop cached, expired client credentials. The next MCP call opens
             # the newly persisted snapshot without restarting Railway.
             try:
@@ -222,8 +227,6 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
                     "Sessão atualizada e validada; reinicie o MCP para carregar a nova sessão.",
                     status_code=202, headers=HEADERS,
                 )
-            config.jti_store.commit(jti, int(payload["exp"]))
-            committed = True
             return PlainTextResponse(
                 "Acesso restaurado. Volte ao ChatGPT e repita sua consulta.",
                 headers=HEADERS,
