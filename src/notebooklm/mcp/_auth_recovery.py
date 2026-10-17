@@ -193,7 +193,9 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
             async for chunk in request.stream():
                 raw.extend(chunk)
                 if len(raw) > MAX_AUTH_BYTES:
-                    return PlainTextResponse("Arquivo muito grande.", status_code=413, headers=HEADERS)
+                    return PlainTextResponse(
+                        "Arquivo muito grande.", status_code=413, headers=HEADERS
+                    )
             try:
                 _validate_storage(bytes(raw), expected)
             except ValueError as exc:
@@ -203,7 +205,7 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
                 return PlainTextResponse("Perfil inválido.", status_code=403, headers=HEADERS)
             try:
                 checked_raw = await _check_live_storage(bytes(raw), expected)
-            except (Exception, asyncio.TimeoutError):
+            except Exception:
                 # Never replace the active profile when Google rejects the candidate.
                 return PlainTextResponse(
                     "O Google não aceitou essa sessão. Faça login novamente e tente outro arquivo.",
@@ -212,7 +214,9 @@ def register_auth_recovery(mcp: FastMCP, config: FileTransferConfig | None) -> N
             try:
                 _write_storage(get_storage_path(profile=profile), checked_raw)
             except OSError:
-                return PlainTextResponse("Não foi possível salvar a sessão.", status_code=500, headers=HEADERS)
+                return PlainTextResponse(
+                    "Não foi possível salvar a sessão.", status_code=500, headers=HEADERS
+                )
             # Burn the link as soon as credentials are written, even when a
             # subsequent in-memory client reload fails.
             config.jti_store.commit(jti, int(payload["exp"]))
