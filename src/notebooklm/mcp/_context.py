@@ -248,3 +248,16 @@ async def get_client_from_app(request: Request, *, profile: str | None = None) -
         raise RuntimeError("MCP lifespan client is not bound")
     state = select_state(cast("AppState | ProfileRegistry", server._lifespan_result), profile)
     return await state.client_provider.get()
+
+
+async def reload_client_from_app(request: Request, *, profile: str | None = None) -> None:
+    """Reload saved Google session after authenticated owner recovery.
+
+    Uses the same lifespan state as get_client_from_app, without opening the
+    currently-expired client first. A subsequent MCP call retries from disk.
+    """
+    server = request.app.state.fastmcp_server
+    if not getattr(server, "_lifespan_result_set", False):
+        raise RuntimeError("MCP lifespan client is not bound")
+    state = select_state(cast("AppState | ProfileRegistry", server._lifespan_result), profile)
+    await state.client_provider.reload_after_auth_change()
