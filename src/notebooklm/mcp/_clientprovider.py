@@ -166,6 +166,27 @@ class ClientProvider:
         self._client = client
         return client
 
+    async def reload_after_auth_change(self) -> None:
+        """Forget cached cookies after the owner replaced storage_state.json.
+
+        This is an administrative recovery operation, not a normal request path.
+        In-flight operations holding the old client may fail; they can be retried
+        after the provider reopens the updated on-disk profile.
+        """
+        if self._closed:
+            raise RuntimeError("The MCP server is shutting down.")
+        task = self._open_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+        self._open_task = None
+        cm, self._cm = self._cm, None
+        self._client = None
+        if cm is not None:
+            await cm.__aexit__(None, None, None)
+        self.start()
+
     async def aclose(
         self,
         exc_type: type[BaseException] | None = None,
